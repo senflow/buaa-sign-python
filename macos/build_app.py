@@ -29,8 +29,8 @@ for size in (16, 32, 128, 256, 512):
 subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(resources / "AppIcon.icns")], check=True)
 info = {
     "CFBundleName": "北航课表", "CFBundleDisplayName": "北航课表", "CFBundleIdentifier": "local.buaa.courses",
-    "CFBundleExecutable": "BUAACourses", "CFBundlePackageType": "APPL", "CFBundleVersion": "8",
-    "CFBundleShortVersionString": "0.8.0", "LSUIElement": True, "LSMinimumSystemVersion": "13.0",
+    "CFBundleExecutable": "BUAACourses", "CFBundlePackageType": "APPL", "CFBundleVersion": "11",
+    "CFBundleShortVersionString": "0.9.2", "LSUIElement": True, "LSMinimumSystemVersion": "13.0",
     "CFBundleIconFile": "AppIcon", "NSHighResolutionCapable": True, "BUAAConfigPath": str(root / "config.json"),
     "BUAAPythonPath": sys.executable,
 }

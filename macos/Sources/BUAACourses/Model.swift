@@ -31,6 +31,7 @@ struct Lesson: Codable, Identifiable {
 }
 struct Reply: Decodable {
     let ok: Bool
+    let network: String?
     let date: String?
     let updated: String?
     let week_start: String?
@@ -118,6 +119,7 @@ final class Bridge {
 }
 
 final class Store: ObservableObject {
+    @Published var network = "direct"
     @Published var lessons: [Lesson] = [] { didSet { rebuildWeek() } }
     @Published var todayMode = true
     @Published var day: String?
@@ -165,6 +167,7 @@ final class Store: ObservableObject {
         return lessons.filter { $0.starts >= begin && $0.starts < end }.sorted { $0.starts < $1.starts }
     }
     func refreshToday() { send(["action": "refresh"]) }
+    func setNetwork(_ mode: String) { send(["action": "set_network", "network": mode]) }
     func refresh() { send(["action": "refresh_semester"]) }
     func sign(_ item: Lesson) { send(["action": "sign", "id": item.id]) }
     func send(_ request: [String: String]) {
@@ -175,6 +178,7 @@ final class Store: ObservableObject {
             self.busy = false; self.signing = nil; self.now = Date()
             switch result {
             case .success(let reply):
+                self.network = reply.network ?? self.network
                 self.lessons = reply.courses ?? self.lessons
                 self.day = reply.date; self.updated = reply.updated; self.loadedWeek = reply.week_start; self.term = reply.term; self.semesterUpdated = reply.semester_updated
                 self.failed = !reply.ok

@@ -1,5 +1,6 @@
 {
   "student_number": "",
   "password": "",
-  "timeout": 15
+  "timeout": 15,
+  "network": "direct"
 }

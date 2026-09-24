@@ -7,7 +7,7 @@ import sys
 
 from datetime import datetime
 
-from .client import CHINA, Client, ClientError, Transport
+from .client import CHINA, Client, ClientError, Transport, WebVPNTransport
 
 PROJECT = Path(__file__).resolve().parent.parent
 
@@ -27,6 +27,8 @@ def read_config(path):
     timeout = data.get("timeout", 15)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise ClientError("timeout 必须为正数。")
+    if data.get("network", "direct") not in ("direct", "webvpn"):
+        raise ClientError("network 必须为 direct 或 webvpn。")
     return data
 
 
@@ -69,6 +71,7 @@ def show_candidates(schedules):
 def parser():
     p = argparse.ArgumentParser(description="北航 iClass：查看今天全部课程、查看当前课程并签到")
     p.add_argument("--config", type=Path, help="配置文件路径（默认项目目录 config.json）")
+    p.add_argument("--network", choices=("direct", "webvpn"), help="网络模式（覆盖配置文件）")
     sub = p.add_subparsers(dest="command")
     sub.add_parser("courses", help="查看今天全部课程")
     sign = sub.add_parser("sign", help="查看当前处于时间窗口的课程并签到")
@@ -94,7 +97,9 @@ def main(argv=None):
                 raise ClientError("请选择 1 或 2。")
             command = {"1": "courses", "2": "sign"}[choice]
         number, password = credentials(config)
-        client = Client(Transport(config.get("timeout", 15)))
+        network = args.network or config.get("network", "direct")
+        transport = WebVPNTransport if network == "webvpn" else Transport
+        client = Client(transport(config.get("timeout", 15)), network=network)
         print("正在登录…")
         client.login(number, password)
         password = None

@@ -22,7 +22,7 @@ open dist/北航课表.app
 - **周课表 / 今日课表、上一周 / 下一周**：使用缓存切换，不请求接口。
 - **签到**：点击按钮立即提交，确认结果后同步更新内存与本地缓存；不会自动签到。
 - **太阳 / 月亮**：切换并保存深浅主题，不联网。
-- **齿轮**：编辑本地账号配置，缺失账号密码时弹窗输入。
+- **齿轮**：选择「校内直连 / 校外 WebVPN」，或打开账号设置；缺失账号密码时弹窗输入。切换网络只保存设置，下一次刷新或重新打开面板时登录。
 
 界面参考 Tokei 的系统字体与字号层级：标题 15–16 pt，课程正文 11–13 pt，辅助信息 10 pt。今日面板宽 440 pt，高度按课程数量自适应，超过上限时滚动；周视图无周末课程时为 580×600 pt，周六、周日分别在有课时显示，每增加一天宽度增加 80 pt。窗口高度受屏幕可用空间限制。界面仅保留课程、状态、更新时间和必要操作，常规刷新成功不再显示重复横幅。
 
@@ -44,7 +44,7 @@ python3 macos/build_app.py
 
 ### 本地验证
 
-- 48 项 Python 测试通过，包括学期日期去重、完整数据替换、失败保留缓存、单课签到状态和账号切换。
+- 79 项 Python 测试通过，包括学期日期去重、完整数据替换、失败保留缓存、单课签到状态、账号切换及 WebVPN 网络适配。WebVPN 测试包括完整模拟网关认证/查询/签到链路，以及使用本地自签名 HTTPS 服务验证证书拒绝（该测试需要系统 `openssl` 命令）。
 - Swift release 构建与应用签名校验通过。
 - `sh macos/Tests/check-schedule-layout.sh` 验证周末独立隐藏、跨午夜、切周及无效课时，使用 Command Line Tools 即可执行。
 - `verification/compact-*.png` 为紧凑版界面截图，覆盖今日、周视图、周末有课、空课表、课程较多和详情状态，均使用示例数据。
@@ -140,7 +140,26 @@ python3 -m buaa_sign --config /绝对路径/config.json courses
 
 使用 CookieJar 管理 SSO Cookie，解析 HTML 隐藏表单字段，跟随有限次数的学校认证跳转，提取 `loginName` 后取得用户 ID。按当前参考实现将 `loginName` 用于后续 `Sessionid` 请求头，用户 ID 放入请求参数。凭据和会话仅保存在当前进程。
 
-当前实现为学校服务直连模式，没有实现 WebVPN 登录、验证码或其他交互认证。Python 会使用系统或环境代理配置；`timeout` 为网络操作超时秒数。服务器时间和签到接口按参考协议使用 HTTP。
+支持直连和北航 `d.buaa.edu.cn` WebVPN 两种模式。Python 会使用系统或环境代理配置；`timeout` 为网络操作超时秒数。直连的服务器时间和签到接口使用 HTTP，WebVPN 模式的本机到网关连接使用 HTTPS，并验证证书；网关到 iClass 的协议保持接口原定义。
+
+### 校外 WebVPN
+
+桌面端选择齿轮菜单中的「校外 WebVPN」，然后刷新。配置保存在原来的 `config.json` 中，默认仍为 `direct`；也可以手动添加 `"network": "webvpn"`。网络切换后会重新认证，不复用之前的业务会话。
+
+命令行可临时覆盖配置（全局选项放在子命令前）：
+
+```sh
+python3 -m buaa_sign --network webvpn courses
+python3 -m buaa_sign --network webvpn sign --dry-run
+```
+
+WebVPN 使用现有统一认证账号密码，通过学校网关登录，再进入 iClass。网址转换只支持已列明的学校服务及端口，固定主机映射不需要额外加密依赖；网关 Cookie 只留在内存，并为并发查询复制独立会话。实现参考了 [BUAASignTool e85be13 的 WebVPN 协议](https://github.com/Fucov/BUAASignTool/blob/e85be13af213e768c4833b44fdebf34a84a8b059/iclass_client.py)。
+
+WebVPN 使用 `8347/app/user/login.action` 返回的 `sessionId`，查询使用 GET；时间戳与签到使用 `8081/app/...`，签到用户 ID 放在表单体。原有直连的 `8346/eschool/...`、`8081/eschool/...` 与 `loginName` 会话约定保持不变。课表目录、课程详情和每日课表遇到连接失败时最多尝试 3 次，间隔 0.5 秒、1 秒；认证错误、证书错误和数据格式错误不重试。学期逐日查询最终失败时报告日期并保留原缓存。不会在失败后自动切换接口或重放签到；通用成功响应仍需查询考勤确认。
+
+当前不支持验证码、扫码或其他交互认证。遇到此类要求会明确停止，可切回直连并使用官方客户端 VPN（以学校实际资源权限为准）。外部浏览器的登录 Cookie 不会自动导入应用。
+
+2026-09-24 使用真实账号通过 WebVPN 完成登录并查询到今日 2 节课程，证书校验保持启用。已覆盖网关编码自身地址、票据交换和 Cookie 传递的回归测试；编码回调请求保留原路径，不提前改写为门户直连地址。自动化测试使用模拟账号；未执行真实签到，也未另行切换校外网络验证。
 
 ## 验证
 
@@ -161,7 +180,7 @@ python3 -m unittest discover -v
 ```text
 buaa_sign/client.py   HTTP、认证、课程和签到逻辑
 buaa_sign/cli.py      两个命令、配置与交互
-tests/               客户端与命令行测试
+tests/               客户端、命令行、WebVPN 与桌面桥接测试
 config.example.json  可选配置示例
 ```
 

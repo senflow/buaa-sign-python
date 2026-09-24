@@ -1,5 +1,9 @@
 import SwiftUI
 
+// Explicitly select the property wrapper, avoiding the new SDK's same-name
+// State macro when building with Command Line Tools without SwiftUIMacros.
+private typealias ViewState<Value> = SwiftUI.State<Value>
+
 private let accent = Color(red: 0.12, green: 0.55, blue: 1)
 
 struct WeekSlot: Identifiable {
@@ -62,7 +66,7 @@ struct Panel: View {
         dark ? [Color(red: 0.105, green: 0.11, blue: 0.13), Color(red: 0.075, green: 0.08, blue: 0.10)]
              : [Color(red: 0.96, green: 0.96, blue: 0.98), Color(red: 0.90, green: 0.91, blue: 0.94)]
     }
-    @State private var selection: String? = CommandLine.arguments.contains("--detail-preview") ? "demo-2" : nil
+    @ViewState private var selection: String? = CommandLine.arguments.contains("--detail-preview") ? "demo-2" : nil
     private let axis: CGFloat = 40
     private let hourHeight: CGFloat = 40
     private var days: [Date] { ScheduleLayout.visibleDays(week: store.week, lessons: store.visibleLessons) }
@@ -109,9 +113,17 @@ struct Panel: View {
             }.buttonStyle(.plain).foregroundStyle(muted)
                 .help(dark ? "切换浅色主题" : "切换深色主题")
                 .accessibilityLabel(dark ? "切换浅色主题" : "切换深色主题")
-            Button { store.openConfig() } label: {
+            Menu {
+                Picker("网络", selection: Binding(get: { store.network }, set: { store.setNetwork($0) })) {
+                    Text("校内直连").tag("direct")
+                    Text("校外 WebVPN").tag("webvpn")
+                }.pickerStyle(.inline)
+                Divider()
+                Button("账号设置") { store.openConfig() }
+            } label: {
                 Image(systemName: "gearshape").font(.system(size: 11)).frame(width: 24, height: 24)
-            }.buttonStyle(.plain).foregroundStyle(muted).help("账号设置").accessibilityLabel("账号设置")
+            }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().disabled(store.busy)
+                .foregroundStyle(muted).help(store.network == "webvpn" ? "设置 · 校外 WebVPN" : "设置 · 校内直连").accessibilityLabel("设置")
         }
     }
     private func modeButton(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -303,8 +315,8 @@ struct Panel: View {
 struct Credentials: View {
     @ObservedObject var store: Store
     var dark = true
-    @State private var number = ""
-    @State private var password = ""
+    @ViewState private var number = ""
+    @ViewState private var password = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("登录北航 iClass").font(.system(size: 15, weight: .semibold))

@@ -10,13 +10,13 @@ from pathlib import Path
 import sys
 
 from .cli import PROJECT, read_config
-from .client import CHINA, Client, ClientError, Transport, Schedule
+from .client import CHINA, Client, ClientError, Transport, WebVPNTransport, Schedule
 
 
 class DesktopService:
     def __init__(self, config_path, client_factory=None):
         self.config_path = config_path
-        self.client_factory = client_factory or (lambda timeout: Client(Transport(timeout)))
+        self.client_factory = client_factory
         self.client = None
         self.identity = None
         self.login_at = None
@@ -29,6 +29,7 @@ class DesktopService:
         self.semester_updated = None
         self.cache_key = None
         self.cache_warning = None
+        self.network = "direct"
 
     @staticmethod
     def configured_term(config):
@@ -39,6 +40,7 @@ class DesktopService:
 
     def snapshot(self):
         return {
+            "network": self.network,
             "term": self.term,
             "semester_updated": self.semester_updated,
             "cache_warning": self.cache_warning,
@@ -94,6 +96,7 @@ class DesktopService:
 
     def authenticate(self, request):
         config = read_config(self.config_path) if self.config_path.exists() else {}
+        self.network = config.get("network", "direct")
         for key in ("student_number", "password"):
             value = request.get(key)
             if isinstance(value, str) and value:
@@ -103,7 +106,8 @@ class DesktopService:
         missing = [k for k, v in (("student_number", number), ("password", password)) if not v]
         if missing:
             return {"ok": False, "needs_credentials": missing, "message": "请填写缺少的账号信息。", **self.snapshot()}
-        identity = (number, password, config.get("timeout", 15))
+        network = config.get("network", "direct")
+        identity = (number, password, config.get("timeout", 15), network)
         if self.identity and self.identity != identity:
             # Never apply a cached course from one account to another account.
             self.rows, self.day, self.updated = [], None, None
@@ -112,10 +116,35 @@ class DesktopService:
             self.cache_key = None
         self.select_cache(number, config)
         if self.client is None or self.identity != identity or datetime.now(CHINA) - self.login_at > timedelta(minutes=25):
-            client = self.client_factory(config.get("timeout", 15))
+            if self.client_factory:
+                client = self.client_factory(config.get("timeout", 15))
+            else:
+                transport = WebVPNTransport if network == "webvpn" else Transport
+                client = Client(transport(config.get("timeout", 15)), network=network)
             client.login(number, password)
             self.client, self.identity, self.login_at = client, identity, datetime.now(CHINA)
         return None
+
+    def set_network(self, network):
+        if network not in ("direct", "webvpn"):
+            raise ClientError("network 必须为 direct 或 webvpn。")
+        config = read_config(self.config_path) if self.config_path.exists() else {}
+        config["network"] = network
+        temporary = None
+        try:
+            fd, temporary = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=self.config_path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(config, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+            os.replace(temporary, self.config_path)
+        except OSError as exc:
+            raise ClientError("无法保存网络模式，请检查配置文件权限。") from exc
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+        self.network = network
+        self.client = None
+        return {"ok": True, **self.snapshot()}
 
     def handle(self, request):
         try:
@@ -123,7 +152,11 @@ class DesktopService:
                 raise ClientError("请求格式错误。")
             action = request.get("action")
             if action == "snapshot":
+                config = read_config(self.config_path) if self.config_path.exists() else {}
+                self.network = config.get("network", "direct")
                 return {"ok": True, **self.snapshot()}
+            if action == "set_network":
+                return self.set_network(request.get("network"))
             if action not in ("refresh", "refresh_week", "refresh_semester", "sign"):
                 raise ClientError("不支持的操作。")
             missing = self.authenticate(request)

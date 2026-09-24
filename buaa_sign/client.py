@@ -1,15 +1,19 @@
 """iClass 客户端：不保存凭据，不自动重试签到请求。"""
 
 from dataclasses import dataclass
+from copy import copy
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 import json
 import re
+import ssl
+from time import sleep
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, unquote
 from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, build_opener
 from zoneinfo import ZoneInfo
+from .webvpn import GATEWAY, LoginForm, gateway_url, original_url
 
 CHINA = ZoneInfo("Asia/Shanghai")
 SSO = "https://sso.buaa.edu.cn/login"
@@ -21,6 +25,10 @@ SIGN = "http://iclass.buaa.edu.cn:8081/eschool"
 
 class ClientError(Exception):
     """可以直接显示给用户的错误，不包含凭据或带 token 的 URL。"""
+
+
+class NetworkError(ClientError):
+    """Connection failure eligible for bounded retries by read-only callers."""
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -41,6 +49,12 @@ class Transport:
         self.timeout = timeout
         self.cookies = CookieJar()
         self.opener = build_opener(HTTPCookieProcessor(self.cookies), NoRedirect())
+
+    def clone(self):
+        worker = type(self)(self.timeout)
+        for cookie in self.cookies:
+            worker.cookies.set_cookie(copy(cookie))
+        return worker
 
     def request(self, method, url, *, params=None, form=None, headers=None):
         if params:
@@ -63,7 +77,25 @@ class Transport:
                                 {k.lower(): v for k, v in response.headers.items()},
                                 response.read().decode("utf-8", errors="replace"))
         except (URLError, OSError, TimeoutError, ValueError) as exc:
-            raise ClientError("网络请求失败或超时，请检查校园网连接及代理设置。") from exc
+            reason = exc.reason if isinstance(exc, URLError) else exc
+            error = ClientError if isinstance(reason, (ssl.SSLError, ValueError)) else NetworkError
+            raise error("网络请求失败或超时，请检查网络连接、VPN 及代理设置。") from exc
+
+
+class WebVPNTransport(Transport):
+    def request(self, method, url, **kwargs):
+        try:
+            url = gateway_url(url)
+        except ValueError as exc:
+            raise ClientError("WebVPN 地址或跳转不在支持的学校服务范围内。") from exc
+        result = super().request(method, url, **kwargs)
+        # An HTML login page / redirect must never be interpreted as an empty
+        # timetable. Do not follow or replay API POSTs after gateway expiry.
+        if "/app/" in urlsplit(url).path and (
+                300 <= result.status < 400 or "<html" in result.body[:1000].lower()
+                or "<form" in result.body[:1000].lower()):
+            raise ClientError("WebVPN 会话已失效或需要额外认证，请重新登录；未自动重发请求。")
+        return result
 
 
 class ExecutionParser(HTMLParser):
@@ -127,8 +159,13 @@ def _time(value):
 
 
 class Client:
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, network="direct"):
+        if network not in ("direct", "webvpn"):
+            raise ClientError("network 必须为 direct 或 webvpn。")
+        self.network = network
         self.transport = transport or Transport()
+        if transport is None and network == "webvpn":
+            self.transport = WebVPNTransport()
         self.user_id = ""
         self.session_id = ""
 
@@ -194,6 +231,8 @@ class Client:
         self.user_id = self.session_id = ""
         if not student_number.strip() or not password:
             raise ClientError("学号和密码不能为空。")
+        if self.network == "webvpn":
+            return self._login_webvpn(student_number, password)
         response = self.transport.request("GET", SSO, params={"service": SERVICE})
         parser = ExecutionParser()
         parser.feed(response.body)
@@ -233,15 +272,107 @@ class Client:
         except (KeyError, TypeError, ValueError) as exc:
             raise ClientError("登录响应缺少用户 ID。") from exc
 
+    def _web_target(self, url):
+        try:
+            original_url(url)
+        except ValueError as exc:
+            raise ClientError("认证跳转地址不在支持的学校服务范围内。") from exc
+        return url
+
+    def _web_follow(self, response, capture=False):
+        for _ in range(12):
+            self._web_target(response.url)
+            if capture:
+                match = re.search(r"[?&]loginName=([^&#\s]+)", response.url)
+                if match:
+                    return unquote(match.group(1)), response
+            if response.status not in (301, 302, 303, 307, 308):
+                return None, response
+            location = response.headers.get("location")
+            if not location:
+                raise ClientError("认证跳转缺少 Location。")
+            target = self._web_target(urljoin(response.url, location))
+            if capture:
+                match = re.search(r"[?&]loginName=([^&#\s]+)", target)
+                if match:
+                    return unquote(match.group(1)), response
+            response = self.transport.request("GET", target)
+        raise ClientError("WebVPN 认证跳转次数超过限制。")
+
+    def _login_webvpn(self, number, password):
+        _, response = self._web_follow(self.transport.request(
+            "GET", SSO, params={"service": GATEWAY + "/login?cas_login=true"}))
+        parser = LoginForm(); parser.feed(response.body)
+        form = parser.login
+        if response.status != 200 or form is None:
+            raise ClientError("无法获取 WebVPN 统一认证表单，网关可能已变化或需要额外认证。")
+        if form["captcha"] or "captchaId=" in response.body:
+            raise ClientError("WebVPN 需要验证码；当前应用不支持交互验证，请改用官方客户端 VPN 的直连模式。")
+        action_value = form["action"]
+        # A root-relative CAS action may not have been rewritten by the
+        # gateway. Resolve it against the logical SSO origin, not the portal.
+        action_base = response.url
+        if action_value and not action_value.startswith(("/https/", "/https-", "/http/", "/http-", "//")):
+            action_base = original_url(response.url)
+        action = self._web_target(urljoin(action_base, action_value or response.url))
+        source, destination = urlsplit(original_url(response.url)), urlsplit(original_url(action))
+        if source.hostname != "sso.buaa.edu.cn" or destination.hostname != "sso.buaa.edu.cn":
+            raise ClientError("认证表单目标不是学校统一认证服务，未发送凭据。")
+        fields = dict(form["fields"])
+        fields.update(username=number.strip(), password=password)
+        fields.setdefault("_eventId", "submit")
+        fields.setdefault("type", "username_password")
+        fields.setdefault("submit", "登录")
+        response = self.transport.request("POST", action, form=fields)
+        # Never replay a credential POST to a 307/308 destination.
+        if response.status in (307, 308):
+            raise ClientError("WebVPN 要求重发认证表单，已停止；请改用官方客户端 VPN。")
+        _, response = self._web_follow(response)
+        error = self._login_error(response)
+        parser = LoginForm(); parser.feed(response.body)
+        if error or response.status != 200 or parser.login:
+            raise ClientError(error or "WebVPN 认证未完成，可能需要验证码或账号安全确认。")
+        login_name, response = self._web_follow(self.transport.request(
+            "GET", SERVICE, params={"type": "jumpMyCenter"}), capture=True)
+        if not login_name:
+            raise ClientError("WebVPN 已响应，但未取得 iClass 登录凭据；请检查资源访问权限。")
+        data = self._json(self.transport.request("GET", QUERY + "/app/user/login.action", params={
+            "phone": login_name, "password": "", "verificationType": "2",
+            "verificationUrl": "", "userLevel": "1"}))
+        self._check(data)
+        try:
+            user_id = _identifier(data["result"]["id"])
+            session_id = _identifier(data["result"]["sessionId"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ClientError("WebVPN iClass 登录响应缺少用户或会话标识。") from exc
+        self.user_id, self.session_id = user_id, session_id
+
     def _api(self, base, path, params=None):
         if not self.user_id or not self.session_id:
             raise ClientError("请先登录。")
+        if self.network == "webvpn":
+            if base == SIGN:
+                base = "http://iclass.buaa.edu.cn:8081"
+            if path == "/app/course/stu_scan_sign.action":
+                return self._json(self.transport.request("POST", base + path,
+                    params=params, form={"id": self.user_id}, headers={"Sessionid": self.session_id}))
+            return self._json(self.transport.request("GET", base + path,
+                params={**(params or {}), "id": self.user_id}, headers={"Sessionid": self.session_id}))
         return self._json(self.transport.request(
             "POST", base + path, params={**(params or {}), "id": self.user_id},
             headers={"Sessionid": self.session_id}))
 
     def _items(self, path, params):
-        data = self._api(QUERY, path, params)
+        # Only these read-only list calls retry connection failures. Authentication,
+        # business errors, malformed data and sign submissions never enter this loop.
+        for attempt in range(3):
+            try:
+                data = self._api(QUERY, path, params)
+                break
+            except NetworkError:
+                if attempt == 2:
+                    raise
+                sleep(0.5 * (attempt + 1))
         self._check(data, empty_ok=True)
         if str(data.get("STATUS")) == "2":
             return []
@@ -324,9 +455,12 @@ class Client:
 
         def read(day):
             # A separate transport per request avoids sharing mutable cookie state.
-            client = Client(Transport(getattr(self.transport, "timeout", 15)))
+            client = Client(self.transport.clone(), network=self.network)
             client.user_id, client.session_id = self.user_id, self.session_id
-            return client.schedules(day)
+            try:
+                return client.schedules(day)
+            except NetworkError as exc:
+                raise ClientError(f"获取 {day} 课表时网络请求失败，已尝试 3 次；保留上次课表，请稍后重试。") from exc
 
         result = {}
         days = [begin + timedelta(days=i) for i in range((finish - begin).days + 1)]
