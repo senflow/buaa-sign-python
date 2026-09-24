@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buaa-sign-python"
+version = "0.1.0"
+description = "北航 iClass 课程查询与手动签到"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+buaa-sign = "buaa_sign.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["buaa_sign*"]

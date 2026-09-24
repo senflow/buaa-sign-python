@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+config.json
+student_accounts.json
+*.log
+macos/.build/
+verification/
+
+.cache/
+.DS_Store
+.env
+.env.*
+!.env.example
